@@ -1,0 +1,361 @@
+
+#需要重開瀏覽器才會資料更新_BUG
+#在空資料情況.上傳檔案部會回傳到方法中
+#意味著方法在第一輪是得到到"空資料"
+#(也就是說沒上傳檔案前就執行我的方法了)
+#盲點#
+#上傳後，才要執行"方法"
+#Packages大集合
+library("stringr")
+#library("devtools")
+library(jiebaR)#分詞套件
+#library("wordcloud")
+library("likert")
+#library("LDAvis")
+#library("servr")
+library(text2vec)
+library(rmngb)
+library("ROracle")
+library(rsconnect)
+library("wordcloud2")
+
+#公共變數
+Sys.setenv(NLS_LANG="AMERICAN_AMERICA.UTF8")
+drv <- dbDriver("Oracle")
+con <- dbConnect(drv,
+                 username = "XXX",
+                 password = "XXX",
+                 dbname="XXX")
+#公共方法
+
+ui <- navbarPage(
+  title ="XXX",
+  tabPanel("上傳資料庫",
+           fileInput("Upload",
+                     "UPLOADFILE"),
+           mainPanel(tableOutput("file1"))
+  ),
+  tabPanel("上傳檔案匯入List",
+           mainPanel(tableOutput("lfetch"))
+  ),
+  #做一個顯示學號評語表的tab
+  tabPanel("選取各學號評語",
+           sidebarLayout(
+             sidebarPanel(
+               selectInput("LIdy",
+                           "選取學號",
+                           "Nah"),             
+               actionButton("UploadLIdy",
+                            "學號評語上傳資料庫!")
+             ),
+             mainPanel(tableOutput("Llist"))
+             )
+           ),
+  tabPanel("各學號斷詞結果",
+           sidebarLayout(
+             sidebarPanel(
+               actionButton("UploadLIdy2",
+                            "斷詞結果上傳資料庫!")
+             ),
+             mainPanel(tableOutput("LCut"))
+              )
+           ),
+  tabPanel("各學號評語詞彙矩陣",
+           sidebarLayout(
+             sidebarPanel(
+               actionButton("UploadLIdy3",
+                            "矩陣上傳資料庫!")
+             ),
+             mainPanel(tableOutput("LDTM"))
+           )
+           ),
+  tabPanel("各學號評語內的詞彙權重",
+           sidebarLayout(
+             sidebarPanel(
+               actionButton("UploadLIdy4",
+                            "詞彙權重上傳資料庫!")
+             ),
+             mainPanel(tableOutput("LDF"))
+           )),
+  tabPanel("文字雲",
+           mainPanel(wordcloud2Output("Visual"))
+           )
+  )
+  
+  
+
+#凡是跟input,output有關，通通放到server端
+server <- function(input, output,session){
+  #輸出原始的上傳檔案
+  output$file1<-renderTable(
+    #read.csv(input$Upload$datapath)
+    read.csv(input$Upload$datapath)
+  )
+  output$lfetch<-renderTable(
+    return(lfetch())
+  )
+  output$Llist<-renderTable({
+      return(SplitComments()[which(input$LIdy==names(SplitComments()))])
+      
+  })
+  
+  output$LCut<-renderTable({
+    return(CutWords())
+  })
+  
+output$LDTM<-renderTable({
+  return(as.matrix(fit_transform(Ldtm(),
+                                 TfIdf$new())))
+})
+
+output$LDF<-renderTable({
+  return(TestFrame())
+})
+
+output$Visual<-renderWordcloud2({
+  wordcloud2(data.frame(
+    a=dbReadTable(con,"DF")[-which(dbReadTable(con,"DF")[,5]==0),1],
+    b= dbReadTable(con,"DF")[-which(dbReadTable(con,"DF")[,5]==0),3]
+  ),
+  size = 0.4)
+})
+  ###############################################################################
+  #將l<-讀入上傳檔案
+  lfetch<-function(){
+    if(is.null(input$Upload$datapath)==TRUE)
+      return(NULL)
+    l<-read.csv(input$Upload$datapath)
+    
+    if(dbExistsTable(con,"UPLOAD")==FALSE)
+      dbWriteTable(con,"UPLOAD",l)
+    else if(dbExistsTable(con,"UPLOAD")==TRUE){
+      dbRemoveTable(con,"UPLOAD")
+      dbWriteTable(con,"UPLOAD",l)
+    }
+    return(l)
+  }
+  #將上傳表格輸入資料庫了!
+  observe(lfetch())
+  
+  #利用lfetch方法的資料，進行姓名、學號、評語分割存取
+  SplitComments<-function(){
+    if(dbExistsTable(con,"UPLOAD")==FALSE)
+      return(NULL)
+    Comments=dbReadTable(con,"UPLOAD")
+    Comments[1]<-as.factor(Comments[1][[1]])
+    Comments[2]<-as.factor(Comments[2][[1]])
+    #學號
+    LIdy=Comments[1][[1]]
+    #姓名
+    LID=Comments[2][[1]]
+    #評語
+    LCM=Comments[3][[1]]
+    Idy=Comments[,1]
+    #抽出Factor學號
+    levels(LIdy)
+    Llist<-list()[1:length(levels(LIdy))]
+    for(b in 1:length(levels(LIdy))){
+      lmin=min(which(as.character(Idy)==levels(LIdy)[b]))
+      lmax=max(which(as.character(Idy)==levels(LIdy)[b]))
+      Ldf=cbind(data.frame(a=LIdy[lmin:lmax]),
+                data.frame(b=LID[lmin:lmax]),
+                data.frame(c=LCM[lmin:lmax])
+                )
+      Llist[b][[1]]=Ldf
+      }
+    names(Llist)=levels(LIdy)
+    return(Llist)
+  }
+  
+  #從SplitComments方法進行斷詞工作
+  CutWords<-function(){
+    if(input$UploadLIdy==TRUE){
+    cby<-worker(bylines=TRUE)
+    Cutted<-dbReadTable(con,"SPLIT")
+    Cutted2=list()
+    for(i in 1:length(Cutted[,3])){
+      Cutted2<-cby[as.character(Cutted[,3])]
+      a<-toString(Cutted2[i][[1]])
+      for(g in 2:length(Cutted2)-1){
+        a<-rbind(a,
+                 toString(Cutted2[g][[1]]))
+      }
+      Cutted2[i][[1]]=a
+      Cutted3=Cutted2[i][[1]]
+    }
+    #length(CUtted3[,1]==92)
+    #class(Cutted3)=matrix
+    #class(Cutted3[1][[1]])=character
+    return(Cutted3)
+    }
+  }
+  
+  Ldtm<-function(){  
+    if(input$UploadLIdy2==TRUE){
+    #人名
+
+    it<-itoken(str_replace_all(dbReadTable(con,"CUT")[,1],
+                               "[^[:alnum:]]",
+                               " "
+                               )
+               )
+    vocab=create_vocabulary(it)
+    vectorizer  = vocab_vectorizer(vocab)
+    dtm = create_dtm(it, vectorizer)
+    #該斷詞詞彙在全部評語中出現次數
+    dtm_freq=as.matrix(dtm)
+    #建立一TFIDF模型
+    tfidf_model=TfIdf$new()
+    #將TFIDF模型套用到資料上
+    dtm_tfidf=fit_transform(dtm,tfidf_model)
+    #將TFIDF資料轉為matrix格式
+    dtm_tfidf_m=as.matrix(dtm_tfidf)
+    #   
+    #資料存放List內方便呼叫
+    return(dtm)
+    }
+  }
+  
+  #讀取表格好壞評
+  PNT<-function(){
+    #這裡很關鍵.
+    #目前是先透過環境變數來讀取資料
+    #之後Deploy可能要連資料夾一起上傳
+    #當然路徑也會改變
+    PNTD=as.data.frame(read.table("/home/rstudio/FINAL_ODB_APP/dtm3.csv"))
+    PNTD[,1]=as.character(PNTD[,1])
+    PNTD[,2]=as.numeric(PNTD[,2])
+    colnames(PNTD)=c("CW","Score")
+    return(PNTD)
+  }
+  #正
+  PNTP<-function(){
+    PNT()[which(PNT()[,2]>0),1]
+  }
+  #負
+  PNTN<-function(){
+    PNT()[which(PNT()[,2]<0),1]
+  }
+  
+  
+  TestFrame<-function(){
+    #colnames(Ldtm()[1][[1]])
+    if(input$UploadLIdy3==TRUE){
+    c<-dbReadTable(con,"DTM")
+    testdata=data.frame(評語詞彙=colnames(c),
+                            TF詞頻=0,
+                            評語中出現次數=0,
+                            TF_IDF=0,
+                            好與壞=0,
+                            好壞程度=0,
+                            評等=0)
+    
+    #學號數量
+    #a<-length(SplitComments())
+    #各學號"詞彙數量"
+    b<-length(testdata[,"評語詞彙"])
+    #各學號"評語數量"
+    #b2<-length(Ldtm()[which(input$LIdy3==names(SplitComments()))][[1]][,1])
+    c1<-as.matrix(Ldtm())
+    p<-PNTP()
+    n<-PNTN()
+    for(i in 1:b){
+      testdata[i,"TF詞頻"]=sum(normalize(c)[,i])
+      testdata[i,"評語中出現次數"]=sum(c1[,i])
+      testdata[i,"TF_IDF"]=sum(c[,i])
+    }
+    #P
+    for(i in 1:b){
+      if(length(which(p==testdata[i,1])==1))
+        testdata[i,"好與壞"]=1
+      testdata[i,"好壞程度"]=testdata[i,"好與壞"]*testdata[i,"TF_IDF"]
+    }
+    
+    #N
+    for(i in 1:b){
+      if(length(which(n==testdata[i,1])==1))
+        testdata[i,"好與壞"]=-1
+      testdata[i,"好壞程度"]=testdata[i,"好與壞"]*testdata[i,"TF_IDF"]
+    }
+    
+    return(testdata)
+    }
+  }
+
+  
+#該方法用來將資料表的學號更新致原有input選項中
+up<-function(){
+  if(is.null(input$Upload$datapath)==TRUE)
+    return(NULL)
+  else if(is.null(input$Upload$datapath)==FALSE)
+    updateSelectInput(session,
+                      "LIdy",
+                      "Test",
+                      names(SplitComments()))
+}
+observe(up())
+
+#點擊上傳鈕後會傳送資料庫
+up2<-function(){
+  if(input$UploadLIdy==TRUE){
+    if(dbExistsTable(con,"SPLIT")==TRUE){
+      dbRemoveTable(con,"SPLIT")
+      dbWriteTable(con,"SPLIT",SplitComments()[input$LIdy][[1]])
+    }else if(dbExistsTable(con,"SPLIT")==FALSE)
+      dbWriteTable(con,"SPLIT",SplitComments()[input$LIdy][[1]])
+  }
+  }
+observe(up2())
+
+#要等完指令時間才會輸入進去
+up3<-function(){
+  if(input$UploadLIdy2==TRUE){
+    if(dbExistsTable(con,"CUT")==TRUE){
+      dbRemoveTable(con,"CUT")
+      dbWriteTable(con,"CUT",
+                   data.frame(i=CutWords()[1:length(CutWords())]))
+    }
+    if(dbExistsTable(con,"CUT")==FALSE)
+      dbWriteTable(con,"CUT",
+                   data.frame(i=CutWords()[1:length(CutWords())]))
+  }
+}
+observe(up3())
+
+up4<-function(){
+  if(input$UploadLIdy3==TRUE){
+    if(dbExistsTable(con,"DTM")==TRUE){
+      dbRemoveTable(con,"DTM")
+      dbWriteTable(con,"DTM",
+                   data.frame(as.matrix(fit_transform(Ldtm(),TfIdf$new()))))
+    }
+    if(dbExistsTable(con,"DTM")==FALSE)
+      dbWriteTable(con,"DTM",
+                   data.frame(as.matrix(fit_transform(Ldtm(),TfIdf$new()))))
+  }
+}
+observe(up4())
+
+up5<-function(){
+  if(input$UploadLIdy4==TRUE){
+    if(dbExistsTable(con,"DF")==TRUE){
+      dbRemoveTable(con,"DF")
+      dbWriteTable(con,"DF",
+                   TestFrame())
+    }
+    if(dbExistsTable(con,"DF")==FALSE)
+      dbWriteTable(con,"DF",
+                   TestFrame())
+  }
+}
+observe(up5())
+
+
+
+
+
+
+
+}
+
+shinyApp(ui = ui, server = server)
